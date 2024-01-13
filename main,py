@@ -1,0 +1,111 @@
+import re
+import os
+from bs4 import BeautifulSoup
+import unicodedata
+import chardet
+import pyodbc
+import shutil
+
+# Replace 'your_html_file.html' with the actual path to your HTML file
+# Assuming your ACCDB file is named 'your_database.accdb'
+database_path = r'tacnch\t\Tanakh.accdb'
+done_directory = 'done'  # Specify the 'done' directory
+
+def get_specific_files_in_directory(directory):
+    file_paths = []
+    for root, dirs, files in os.walk(directory):
+        for file in files:
+            if len(file) >= 8 and file.endswith(".htm") and file.startswith("t"):
+                file_path = os.path.join(root, file)
+                file_paths.append(file_path)
+    return file_paths
+
+def insert_into_tanakh(humash, perek, pasuk_char, pasuk_value):
+    connection_string = r'DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=' + database_path
+    connection = pyodbc.connect(connection_string)
+    cursor = connection.cursor()
+    insert_query = "INSERT INTO Tanakh (humash, perek, pasuk_char, pasuk_value) VALUES (?, ?, ?, ?)"
+    values = (humash, perek, pasuk_char, pasuk_value)
+    cursor.execute(insert_query, values)
+    connection.commit()
+    connection.close()
+
+
+def remove_nikkud(input_text, remove_taamei_hamikra=False):
+    normalized = unicodedata.normalize('NFKD', input_text)
+
+    # Remove Nikkud (vowel points) or Taamei Hamikra if specified
+    if remove_taamei_hamikra:
+        result = re.sub(re.compile(r'[\u0591-\u05AF]'), "", input_text)
+    else:
+        result = ''.join([c for c in normalized if not unicodedata.combining(c)])
+
+    # Remove the last dot, "{ס}," and "{פ}"
+    result = result.rstrip('. ')
+    result = result.replace(".  {ס}", "").replace(".  {פ}", "")
+
+    return result
+
+
+def main(file_path):
+    with open(file_path, 'rb') as file:
+        result = chardet.detect(file.read())
+    encoding = result['encoding']
+    with open(file_path, 'r', encoding=encoding, errors='ignore') as file:
+        html_content = file.read()
+    soup = BeautifulSoup(html_content, 'html.parser')
+    humsh = soup.find_all('h1')[0].text.split(" פרק ")[0]
+    perek = soup.find_all('h1')[0].text.split(" פרק ")[1]
+    psukim_hash = soup.find_all("p")[1].text.split("\n")
+    psukim = [psukim_n for psukim_n in psukim_hash if psukim_n != ' ']
+
+    for pasuk in psukim:
+        pasuk_char = pasuk.split(" ")[0]
+        pasuk_value = pasuk.replace(pasuk_char, "", 1)
+        insert_into_tanakh(humsh, perek, pasuk_char, remove_nikkud(pasuk_value))
+        print(humsh, perek, pasuk_char, remove_nikkud(pasuk_value))
+
+    # Move the processed file to the 'done' directory
+    done_path = os.path.join(done_directory, os.path.basename(file_path))
+    shutil.move(file_path, done_path)
+    print(f"Moved {file_path} to {done_path}")
+
+# Create the 'done' directory if it doesn't exist
+os.makedirs(done_directory, exist_ok=True)
+
+# Process and move each file
+path_files = get_specific_files_in_directory(os.getcwd())
+for file_path in path_files:
+    main(file_path)
+
+def find_pasuk_by_name(name):
+    # Extract first and last letters
+    first_letter = name[0].upper()
+    last_letter = name[-1].upper()
+
+    # Connect to the Tanakh database
+    connection_string = r'DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};DBQ=Tanakh.accdb'
+    connection = pyodbc.connect(connection_string)
+    cursor = connection.cursor()
+
+    # SQL query to find a verse that starts and ends with the specified letters
+    sql_query = """
+                SELECT TOP 1 humash, perek, pasuk_value
+                FROM Tanakh 
+                WHERE pasuk_value LIKE ? AND pasuk_value LIKE ?
+                ORDER BY NEWID()
+                """
+
+    # Parameters for the SQL query
+    params = (f'{first_letter}%', f'%{last_letter}')
+
+    # Execute the query
+    cursor.execute(sql_query, params)
+
+    # Fetch the result
+    verse = cursor.fetchone()
+
+    # Close the database connection
+    connection.close()
+
+    return verse
